@@ -12,7 +12,9 @@ import {AccessDeniedError} from "../../error/AccessDeniedError";
 import {isPromiseLike} from "../../util/isPromiseLike";
 import {getFromContainer} from "../../container";
 import {RoleChecker} from "../../RoleChecker";
+import {AuthorizationRequiredError} from "../../error/AuthorizationRequiredError";
 const cookie = require("cookie");
+const templateUrl = require("template-url");
 
 /**
  * Integration with koa framework.
@@ -86,26 +88,24 @@ export class KoaDriver extends BaseDriver implements Driver {
                 if (!this.authorizationChecker)
                     throw new AuthorizationCheckerNotDefinedError();
 
-                const action: Action = { request: context.request, response: context.response, context, next };
+                const action: Action = {request: context.request, response: context.response, context, next};
                 const checkResult = actionMetadata.authorizedRoles instanceof Function ?
                     getFromContainer<RoleChecker>(actionMetadata.authorizedRoles).check(action) :
                     this.authorizationChecker(action, actionMetadata.authorizedRoles);
 
-                if (isPromiseLike(checkResult)) {
-                    return checkResult.then(result => {
-                        if (!result) {
-                            return this.handleError(new AccessDeniedError(action), actionMetadata, action);
-
-                        } else {
-                            return next();
-                        }
-                    });
-                } else {
-                    if (!checkResult) {
-                        return this.handleError(new AccessDeniedError(action), actionMetadata, action);
+                const handleError = (result: any) => {
+                    if (!result) {
+                        let error = actionMetadata.authorizedRoles.length === 0 ? new AuthorizationRequiredError(action) : new AccessDeniedError(action);
+                        return this.handleError(error, actionMetadata, action);
                     } else {
-                        return next();
+                        next();
                     }
+                };
+
+                if (isPromiseLike(checkResult)) {
+                    checkResult.then(result => handleError(result));
+                } else {
+                    handleError(checkResult);
                 }
             });
         }
@@ -118,7 +118,7 @@ export class KoaDriver extends BaseDriver implements Driver {
         // prepare route and route handler function
         const route = ActionMetadata.appendBaseRoute(this.routePrefix, actionMetadata.fullRoute);
         const routeHandler = (context: any, next: () => Promise<any>) => {
-            const options: Action = { request: context.request, response: context.response, context, next };
+            const options: Action = {request: context.request, response: context.response, context, next};
             return executeCallback(options);
         };
 
@@ -232,7 +232,14 @@ export class KoaDriver extends BaseDriver implements Driver {
         });
 
         if (action.redirect) { // if redirect is set then do it
-            options.response.redirect(action.redirect);
+            if (typeof result === "string") {
+                options.response.redirect(result);
+            } else if (result instanceof Object) {
+                options.response.redirect(templateUrl(action.redirect, result));
+            } else {
+                options.response.redirect(action.redirect);
+            }
+
             return options.next();
 
         } else if (action.renderedTemplate) { // if template is set then render it // todo: not working in koa
@@ -279,7 +286,7 @@ export class KoaDriver extends BaseDriver implements Driver {
     /**
      * Handles result of failed executed controller action.
      */
-    handleError(error: any, action: ActionMetadata|undefined, options: Action): any {
+    handleError(error: any, action: ActionMetadata | undefined, options: Action): any {
         if (this.isDefaultErrorHandlingEnabled) {
             const response: any = options.response;
             console.log("ERROR: ", error);
@@ -330,14 +337,24 @@ export class KoaDriver extends BaseDriver implements Driver {
                         const useResult = (getFromContainer(use.middleware) as KoaMiddlewareInterface).use(context, next);
                         if (isPromiseLike(useResult)) {
                             useResult.catch((error: any) => {
-                                this.handleError(error, undefined, { request: context.req, response: context.res, context, next });
+                                this.handleError(error, undefined, {
+                                    request: context.req,
+                                    response: context.res,
+                                    context,
+                                    next
+                                });
                                 return error;
                             });
                         }
 
                         return useResult;
-                    } catch(error) {
-                        this.handleError(error, undefined, { request: context.request, response: context.response, context, next });
+                    } catch (error) {
+                        this.handleError(error, undefined, {
+                            request: context.request,
+                            response: context.response,
+                            context,
+                            next
+                        });
                     }
                 });
 
